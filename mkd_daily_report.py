@@ -59,7 +59,7 @@ def read_data_files():
     df_profit = pd.read_excel(profit_file, usecols=profit_cols)
 
     print(f"读取订单管理文件: {os.path.basename(order_file)}")
-    order_cols = ['订单日期', '订单状态', '商品ID', 'SKU', '销售数量', '销售单价(MXN)']
+    order_cols = ['订单日期', '订单状态', '商品ID', 'SKU', '销售数量', '销售额(MXN)']
     df_orders = pd.read_excel(order_file, usecols=order_cols)
 
     return df_inventory, df_profit, df_orders
@@ -92,6 +92,9 @@ def process_inventory_data(df_inventory):
     # 生成卖家SPU
     df['卖家SPU'] = df['卖家SKU'].apply(extract_seller_spu)
 
+    # 生成平台SPU&卖家SKU（直接连接，不加&符号）
+    df['平台SPU&卖家SKU'] = df['平台SPU'].astype(str) + df['卖家SKU'].astype(str)
+
     # 计算日均销量
     df['日均销量'] = df.apply(calculate_daily_sales_avg, axis=1)
 
@@ -108,24 +111,45 @@ def merge_profit_data(df_base, df_profit):
     # 去重，保留第一条记录
     df_profit_unique = df_profit.drop_duplicates(subset=['商品ID'], keep='first')
 
+    # 将百分比转换为小数
+    def percent_to_decimal(value):
+        if pd.isna(value) or value == '' or value is None or value == '-':
+            return 0.00
+        if isinstance(value, str):
+            if '%' in value:
+                # 移除%号并转换
+                value = value.replace('%', '')
+                if value == '' or value == '-':
+                    return 0.00
+                return float(value) / 100
+            elif value == '-':
+                return 0.00
+        try:
+            return float(value)
+        except:
+            return 0.00
+
+    df_profit_unique['净利率'] = df_profit_unique['净利率'].apply(percent_to_decimal)
+    df_profit_unique['ACoAS'] = df_profit_unique['ACoAS'].apply(percent_to_decimal)
+
     # 重命名列
     df_profit_unique.rename(columns={
         '商品ID': '平台SPU',
-        '净利率': '近7天利润率',
-        'ACoAS': '近7天ACOAS'
+        '净利率': '近7天净利率',
+        'ACoAS': '近7天ACoAS'
     }, inplace=True)
 
     # 合并数据
     df_merged = pd.merge(df_base, df_profit_unique, on='平台SPU', how='left')
 
     # 填充缺失值
-    df_merged['近7天利润率'] = df_merged['近7天利润率'].fillna('0%')
-    df_merged['近7天ACOAS'] = df_merged['近7天ACOAS'].fillna('0%')
+    df_merged['近7天净利率'] = df_merged['近7天净利率'].fillna(0.00)
+    df_merged['近7天ACoAS'] = df_merged['近7天ACoAS'].fillna(0.00)
 
     return df_merged
 
 def calculate_daily_metrics(df_orders):
-    """计算每日销量和价格"""
+    """计算每日销量和销售额"""
     # 筛选已支付订单
     df_paid = df_orders[df_orders['订单状态'] == '已支付'].copy()
 
@@ -148,7 +172,7 @@ def calculate_daily_metrics(df_orders):
             # 按商品ID和SKU分组统计
             grouped = df_day.groupby(['商品ID', 'SKU']).agg({
                 '销售数量': 'sum',
-                '销售单价(MXN)': 'mean'
+                '销售额(MXN)': 'sum'
             }).reset_index()
 
             for _, row in grouped.iterrows():
@@ -156,8 +180,8 @@ def calculate_daily_metrics(df_orders):
                 if key not in daily_metrics:
                     daily_metrics[key] = {}
 
+                daily_metrics[key][f'{days_ago}天前销售额'] = round(row['销售额(MXN)'], 2)
                 daily_metrics[key][f'{days_ago}天前销量'] = int(row['销售数量'])
-                daily_metrics[key][f'{days_ago}天前价格'] = round(row['销售单价(MXN)'], 2)
 
     return daily_metrics
 
@@ -166,7 +190,7 @@ def merge_daily_metrics(df_base, daily_metrics):
     # 创建每日列
     for days_ago in range(1, 8):
         df_base[f'{days_ago}天前销量'] = 0
-        df_base[f'{days_ago}天前价格'] = 0.00
+        df_base[f'{days_ago}天前销售额'] = 0.00
 
     # 填充数据
     for idx, row in df_base.iterrows():
@@ -179,12 +203,12 @@ def merge_daily_metrics(df_base, daily_metrics):
 
 def format_output_data(df):
     """格式化输出数据"""
-    # 定义输出列顺序
+    # 定义输出列顺序（按照PRD要求）
     output_columns = [
-        '平台SPU', '卖家SKU', '卖家SPU', '近60天销量', '近30天销量', '近15天销量',
-        '近7天销量', '日均销量', '可售天数', '近7天利润率', '近7天ACOAS', '在售库存',
+        '平台SPU', '卖家SKU', '卖家SPU', '平台SPU&卖家SKU', '近60天销量', '近30天销量', '近15天销量',
+        '近7天销量', '日均销量', '可售天数', '近7天净利率', '近7天ACoAS', '在售库存',
         '7天前销量', '6天前销量', '5天前销量', '4天前销量', '3天前销量', '2天前销量', '1天前销量',
-        '7天前价格', '6天前价格', '5天前价格', '4天前价格', '3天前价格', '2天前价格', '1天前价格'
+        '7天前销售额', '6天前销售额', '5天前销售额', '4天前销售额', '3天前销售额', '2天前销售额', '1天前销售额'
     ]
 
     # 确保所有列都存在
@@ -192,7 +216,7 @@ def format_output_data(df):
         if col not in df.columns:
             if '销量' in col:
                 df[col] = 0
-            elif '价格' in col:
+            elif '销售额' in col or '净利率' in col or 'ACoAS' in col:
                 df[col] = 0.00
             else:
                 df[col] = ''
@@ -201,16 +225,22 @@ def format_output_data(df):
     df_output = df[output_columns].copy()
 
     # 格式化数值
-    sales_cols = [col for col in df_output.columns if '销量' in col]
+    sales_cols = [col for col in df_output.columns if '销量' in col and col != '日均销量']
     for col in sales_cols:
         df_output[col] = df_output[col].apply(lambda x: int(x) if not pd.isna(x) else 0)
 
-    price_cols = [col for col in df_output.columns if '价格' in col]
-    for col in price_cols:
+    sales_amount_cols = [col for col in df_output.columns if '销售额' in col]
+    for col in sales_amount_cols:
         df_output[col] = df_output[col].apply(lambda x: round(float(x), 2) if not pd.isna(x) else 0.00)
 
+    # 处理净利率和ACoAS字段，保留4位小数
+    if '近7天净利率' in df_output.columns:
+        df_output['近7天净利率'] = df_output['近7天净利率'].apply(lambda x: round(float(x), 4) if not pd.isna(x) else 0.0000)
+    if '近7天ACoAS' in df_output.columns:
+        df_output['近7天ACoAS'] = df_output['近7天ACoAS'].apply(lambda x: round(float(x), 4) if not pd.isna(x) else 0.0000)
+
     df_output['可售天数'] = df_output['可售天数'].apply(lambda x: round(float(x), 2) if not pd.isna(x) else 0.00)
-    df_output['日均销量'] = df_output['日均销量'].apply(lambda x: round(float(x), 2) if not pd.isna(x) else 0.00)
+    df_output['日均销量'] = df_output['日均销量'].apply(lambda x: round(float(x), 1) if not pd.isna(x) else 0.0)
 
     # 处理空值，确保卖家SKU不为空
     df_output['卖家SKU'] = df_output['卖家SKU'].fillna('')
@@ -244,16 +274,17 @@ def create_table_if_not_exists(engine):
         id INT AUTO_INCREMENT PRIMARY KEY,
         platform_spu VARCHAR(20) NOT NULL COMMENT '平台SPU',
         seller_sku VARCHAR(50) NOT NULL COMMENT '卖家SKU',
+        platform_seller_sku VARCHAR(100) COMMENT '平台SPU&卖家SKU',
         seller_spu VARCHAR(50) COMMENT '卖家SPU',
         sales_60d INT DEFAULT 0 COMMENT '近60天销量',
         sales_30d INT DEFAULT 0 COMMENT '近30天销量',
         sales_15d INT DEFAULT 0 COMMENT '近15天销量',
         sales_7d INT DEFAULT 0 COMMENT '近7天销量',
-        avg_daily_sales DECIMAL(10,2) DEFAULT 0.00 COMMENT '日均销量',
+        avg_daily_sales DECIMAL(10,1) DEFAULT 0.0 COMMENT '日均销量',
         available_stock INT DEFAULT 0 COMMENT '在售库存',
         sellable_days DECIMAL(10,2) DEFAULT 0.00 COMMENT '可售天数',
-        profit_rate_7d VARCHAR(10) DEFAULT '0%' COMMENT '近7天利润率',
-        acoas_7d VARCHAR(10) DEFAULT '0%' COMMENT '近7天ACOAS',
+        profit_rate_7d DECIMAL(10,4) DEFAULT 0.0000 COMMENT '近7天净利率',
+        acoas_7d DECIMAL(10,4) DEFAULT 0.0000 COMMENT '近7天ACoAS',
         sales_7d_ago INT DEFAULT 0 COMMENT '7天前销量',
         sales_6d_ago INT DEFAULT 0 COMMENT '6天前销量',
         sales_5d_ago INT DEFAULT 0 COMMENT '5天前销量',
@@ -261,16 +292,14 @@ def create_table_if_not_exists(engine):
         sales_3d_ago INT DEFAULT 0 COMMENT '3天前销量',
         sales_2d_ago INT DEFAULT 0 COMMENT '2天前销量',
         sales_1d_ago INT DEFAULT 0 COMMENT '1天前销量',
-        price_7d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '7天前价格',
-        price_6d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '6天前价格',
-        price_5d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '5天前价格',
-        price_4d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '4天前价格',
-        price_3d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '3天前价格',
-        price_2d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '2天前价格',
-        price_1d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '1天前价格',
+        gmv_7d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '7天前GMV',
+        gmv_6d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '6天前GMV',
+        gmv_5d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '5天前GMV',
+        gmv_4d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '4天前GMV',
+        gmv_3d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '3天前GMV',
+        gmv_2d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '2天前GMV',
+        gmv_1d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '1天前GMV',
         data_date DATE COMMENT '数据日期',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_platform_spu (platform_spu),
         INDEX idx_seller_sku (seller_sku),
         INDEX idx_data_date (data_date),
@@ -289,7 +318,7 @@ def create_table_if_not_exists(engine):
         return False
 
 def upload_to_database(df_output, engine):
-    """上传数据到数据库"""
+    """上传数据到数据库（使用TRUNCATE清空表）"""
     try:
         df_upload = df_output.copy()
 
@@ -305,8 +334,8 @@ def upload_to_database(df_output, engine):
             '日均销量': 'avg_daily_sales',
             '在售库存': 'available_stock',
             '可售天数': 'sellable_days',
-            '近7天利润率': 'profit_rate_7d',
-            '近7天ACOAS': 'acoas_7d',
+            '近7天净利率': 'profit_rate_7d',
+            '近7天ACoAS': 'acoas_7d',
             '7天前销量': 'sales_7d_ago',
             '6天前销量': 'sales_6d_ago',
             '5天前销量': 'sales_5d_ago',
@@ -314,13 +343,14 @@ def upload_to_database(df_output, engine):
             '3天前销量': 'sales_3d_ago',
             '2天前销量': 'sales_2d_ago',
             '1天前销量': 'sales_1d_ago',
-            '7天前价格': 'price_7d_ago',
-            '6天前价格': 'price_6d_ago',
-            '5天前价格': 'price_5d_ago',
-            '4天前价格': 'price_4d_ago',
-            '3天前价格': 'price_3d_ago',
-            '2天前价格': 'price_2d_ago',
-            '1天前价格': 'price_1d_ago'
+            '平台SPU&卖家SKU': 'platform_seller_sku',
+            '7天前销售额': 'gmv_7d_ago',
+            '6天前销售额': 'gmv_6d_ago',
+            '5天前销售额': 'gmv_5d_ago',
+            '4天前销售额': 'gmv_4d_ago',
+            '3天前销售额': 'gmv_3d_ago',
+            '2天前销售额': 'gmv_2d_ago',
+            '1天前销售额': 'gmv_1d_ago'
         }
 
         df_upload.rename(columns=column_mapping, inplace=True)
@@ -333,22 +363,18 @@ def upload_to_database(df_output, engine):
         # 添加数据日期
         df_upload['data_date'] = datetime.now().date()
 
-        # 使用pymysql直接删除今天的旧数据
+        # 使用TRUNCATE清空整个表
         try:
             conn = pymysql.connect(**DB_CONFIG)
             cursor = conn.cursor()
-            delete_sql = "DELETE FROM daily_data_mkd WHERE data_date = %s"
-            cursor.execute(delete_sql, (datetime.now().date(),))
-            deleted_rows = cursor.rowcount
+            # TRUNCATE比DELETE更快，会重置自增ID
+            cursor.execute("TRUNCATE TABLE daily_data_mkd")
             conn.commit()
             cursor.close()
             conn.close()
-            if deleted_rows > 0:
-                print(f"  已清除 {deleted_rows} 条今日旧数据")
-            else:
-                print(f"  无需清除旧数据")
+            print("  已清空数据表")
         except Exception as e:
-            print(f"  清除旧数据时出现问题: {str(e)}")
+            print(f"  清空数据表时出现问题: {str(e)}")
 
         # 上传新数据
         df_upload.to_sql(
@@ -366,150 +392,6 @@ def upload_to_database(df_output, engine):
     except Exception as e:
         print(f"  数据上传失败: {str(e)}")
         return False
-
-# ===================== 辅助功能函数 =====================
-
-def view_database_data():
-    """查看数据库中的数据"""
-    try:
-        conn = pymysql.connect(**DB_CONFIG)
-        cursor = conn.cursor()
-
-        print("\n" + "="*60)
-        print("查看 daily_data_mkd 表中的数据")
-        print("="*60)
-
-        # 获取数据总数
-        cursor.execute("SELECT COUNT(*) FROM daily_data_mkd")
-        total_count = cursor.fetchone()[0]
-        print(f"\n数据总数: {total_count} 条")
-
-        # 获取日期分布
-        cursor.execute("""
-            SELECT data_date, COUNT(*) as count
-            FROM daily_data_mkd
-            GROUP BY data_date
-            ORDER BY data_date DESC
-            LIMIT 7
-        """)
-        date_distribution = cursor.fetchall()
-
-        if date_distribution:
-            print("\n最近7天数据分布:")
-            print("-"*40)
-            for date, count in date_distribution:
-                print(f"  {date}: {count} 条")
-
-        # 查看最新10条数据
-        cursor.execute("""
-            SELECT
-                platform_spu,
-                seller_sku,
-                sales_7d,
-                available_stock,
-                data_date
-            FROM daily_data_mkd
-            ORDER BY id DESC
-            LIMIT 10
-        """)
-        recent_data = cursor.fetchall()
-
-        if recent_data:
-            print("\n最新10条数据:")
-            print("-"*60)
-            print(f"{'平台SPU':<15} {'卖家SKU':<20} {'7天销量':<8} {'库存':<8} {'日期'}")
-            print("-"*60)
-            for row in recent_data:
-                print(f"{row[0]:<15} {row[1]:<20} {row[2]:<8} {row[3]:<8} {row[4]}")
-
-        cursor.close()
-        conn.close()
-
-    except Exception as e:
-        print(f"\n[错误] 查询失败: {str(e)}")
-
-def clear_today_data():
-    """清除今日数据"""
-    try:
-        conn = pymysql.connect(**DB_CONFIG)
-        cursor = conn.cursor()
-
-        today = datetime.now().date()
-        delete_sql = "DELETE FROM daily_data_mkd WHERE data_date = %s"
-        cursor.execute(delete_sql, (today,))
-        deleted_rows = cursor.rowcount
-        conn.commit()
-
-        print(f"\n已清除 {deleted_rows} 条今日数据（日期：{today}）")
-
-        cursor.close()
-        conn.close()
-
-    except Exception as e:
-        print(f"\n[错误] 清除数据失败: {str(e)}")
-
-def setup_database_table():
-    """强制重建数据库表"""
-    try:
-        conn = pymysql.connect(**DB_CONFIG)
-        cursor = conn.cursor()
-
-        print("\n正在重建数据库表...")
-
-        # 删除旧表
-        cursor.execute("DROP TABLE IF EXISTS daily_data_mkd")
-        print("  旧表已删除")
-
-        # 创建新表
-        create_sql = """
-        CREATE TABLE daily_data_mkd (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            platform_spu VARCHAR(20) NOT NULL COMMENT '平台SPU',
-            seller_sku VARCHAR(50) NOT NULL COMMENT '卖家SKU',
-            seller_spu VARCHAR(50) COMMENT '卖家SPU',
-            sales_60d INT DEFAULT 0 COMMENT '近60天销量',
-            sales_30d INT DEFAULT 0 COMMENT '近30天销量',
-            sales_15d INT DEFAULT 0 COMMENT '近15天销量',
-            sales_7d INT DEFAULT 0 COMMENT '近7天销量',
-            avg_daily_sales DECIMAL(10,2) DEFAULT 0.00 COMMENT '日均销量',
-            available_stock INT DEFAULT 0 COMMENT '在售库存',
-            sellable_days DECIMAL(10,2) DEFAULT 0.00 COMMENT '可售天数',
-            profit_rate_7d VARCHAR(10) DEFAULT '0%' COMMENT '近7天利润率',
-            acoas_7d VARCHAR(10) DEFAULT '0%' COMMENT '近7天ACOAS',
-            sales_7d_ago INT DEFAULT 0 COMMENT '7天前销量',
-            sales_6d_ago INT DEFAULT 0 COMMENT '6天前销量',
-            sales_5d_ago INT DEFAULT 0 COMMENT '5天前销量',
-            sales_4d_ago INT DEFAULT 0 COMMENT '4天前销量',
-            sales_3d_ago INT DEFAULT 0 COMMENT '3天前销量',
-            sales_2d_ago INT DEFAULT 0 COMMENT '2天前销量',
-            sales_1d_ago INT DEFAULT 0 COMMENT '1天前销量',
-            price_7d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '7天前价格',
-            price_6d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '6天前价格',
-            price_5d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '5天前价格',
-            price_4d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '4天前价格',
-            price_3d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '3天前价格',
-            price_2d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '2天前价格',
-            price_1d_ago DECIMAL(10,2) DEFAULT 0.00 COMMENT '1天前价格',
-            data_date DATE COMMENT '数据日期',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_platform_spu (platform_spu),
-            INDEX idx_seller_sku (seller_sku),
-            INDEX idx_data_date (data_date),
-            UNIQUE KEY uk_sku_date (platform_spu, seller_sku, data_date)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='MKD每日数据表'
-        """
-
-        cursor.execute(create_sql)
-        conn.commit()
-
-        print("  新表创建成功")
-
-        cursor.close()
-        conn.close()
-
-    except Exception as e:
-        print(f"\n[错误] 重建表失败: {str(e)}")
 
 # ===================== 主程序函数 =====================
 
@@ -537,8 +419,8 @@ def generate_report():
         print("\n[3/6] 合并利润数据...")
         df_base = merge_profit_data(df_base, df_profit)
 
-        # 4. 计算每日销量和价格
-        print("\n[4/6] 计算每日销量和价格...")
+        # 4. 计算每日销量和销售额
+        print("\n[4/6] 计算每日销量和销售额...")
         daily_metrics = calculate_daily_metrics(df_orders)
         print(f"  统计SKU数量: {len(daily_metrics)}")
 
@@ -585,64 +467,10 @@ def generate_report():
 
     return 0
 
-def show_menu():
-    """显示功能菜单"""
-    print("\n" + "="*60)
-    print("MKD每日数据报表系统")
-    print("="*60)
-    print("1. 生成报表并上传数据库")
-    print("2. 查看数据库数据")
-    print("3. 清除今日数据")
-    print("4. 重建数据库表（危险操作）")
-    print("0. 退出")
-    print("-"*60)
 
 def main():
-    """主程序入口"""
-    if len(sys.argv) > 1:
-        # 命令行参数模式
-        command = sys.argv[1].lower()
-        if command in ['generate', 'run', '1']:
-            return generate_report()
-        elif command in ['view', 'show', '2']:
-            view_database_data()
-            return 0
-        elif command in ['clear', '3']:
-            clear_today_data()
-            return 0
-        elif command in ['setup', 'rebuild', '4']:
-            response = input("警告：这将删除并重建表，所有数据将丢失！确定继续？(yes/no): ")
-            if response.lower() == 'yes':
-                setup_database_table()
-            return 0
-        else:
-            print("未知命令。可用命令：generate, view, clear, setup")
-            return 1
-    else:
-        # 交互式菜单模式
-        while True:
-            show_menu()
-            choice = input("请选择功能 (0-4): ").strip()
-
-            if choice == '1':
-                generate_report()
-            elif choice == '2':
-                view_database_data()
-            elif choice == '3':
-                clear_today_data()
-            elif choice == '4':
-                response = input("警告：这将删除并重建表，所有数据将丢失！确定继续？(yes/no): ")
-                if response.lower() == 'yes':
-                    setup_database_table()
-            elif choice == '0':
-                print("\n再见！")
-                break
-            else:
-                print("\n无效选择，请重试。")
-
-            input("\n按回车键继续...")
-
-        return 0
+    """主程序入口 - 直接执行生成报表"""
+    return generate_report()
 
 if __name__ == "__main__":
     exit(main())
