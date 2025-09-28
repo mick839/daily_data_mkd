@@ -1,0 +1,39 @@
+# Ignore all Excel files
+*.xlsx
+*.xls
+*.xlsm
+*.xlsb
+
+# Ignore temporary Excel files
+~$*.xlsx
+~$*.xls
+~*.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.local
